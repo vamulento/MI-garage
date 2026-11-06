@@ -67,6 +67,7 @@ a{color:var(--accent)}
 .who{font-size:.85rem;display:flex;align-items:center;gap:10px;min-width:0;color:rgba(255,255,255,.85)}
 .who span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:30vw}
 .who .linkbtn{color:#fff}
+.who .syncst{font-size:.72rem;opacity:.75}
 .badge-demo{background:#FFE3A3;color:#6B4200;font-weight:600;font-size:.7rem;letter-spacing:.08em;text-transform:uppercase;padding:3px 8px;border-radius:5px}
 
 /* nav */
@@ -238,9 +239,9 @@ var TYPE_ORDER=["combustible","taller","seguro","itv","impuesto","otros"];
 var FUELS=["Gasolina","Diésel","Híbrido","Híbrido enchufable","Eléctrico","GLP","GNC"];
 var VTYPES=["Coche","Moto","Furgoneta","Otro"];
 var TECH=[["vin","Nº de bastidor (VIN)"],["matric","Primera matriculación"],["cv","Potencia (CV)"],["kw","Potencia (kW)"],["cc","Cilindrada (cc)"],["cil","Cilindros"],["trans","Transmisión"],["tank","Depósito / batería"],["tires","Neumáticos"],["oil","Aceite motor"],["weight","Peso (kg)"],["label","Etiqueta ambiental"],["co2","CO₂ (g/km)"],["seats","Plazas"]];
-var KEY="garage.v1",AUTH="garage.auth",REM="garage.remember",SESS="garage.sess",APIKEY="garage.apikey";
+var KEY="garage.v1",AUTH="garage.auth",REM="garage.remember",SESS="garage.sess",APIKEY="garage.apikey",ACC="garage.account",SYNC="garage.sync";
 var RM=window.matchMedia&&matchMedia("(prefers-reduced-motion: reduce)").matches;
-var S={mode:"boot",demo:false,name:"",vehicles:[],records:[],settings:{},tab:"resumen",vid:null,fv:"all",ft:"all",draft:null,sheet:null,pending:null,anim:false,authErr:""};
+var S={mode:"boot",demo:false,name:"",vehicles:[],records:[],settings:{},tab:"resumen",vid:null,fv:"all",ft:"all",draft:null,sheet:null,pending:null,anim:false,authErr:"",authOk:"",authEmail:"",authName:""};
 
 /* ---------- helpers ---------- */
 function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]})}
@@ -276,10 +277,14 @@ var ICON={
 function load(){
   try{var j=JSON.parse(localStorage.getItem(KEY)||"null");if(j){S.vehicles=j.vehicles||[];S.records=j.records||[];S.settings=j.settings||{}}}catch(e){}
 }
+function localSave(){
+  try{localStorage.setItem(KEY,JSON.stringify({vehicles:S.vehicles,records:S.records,settings:S.settings}));return true}
+  catch(e){toast("No se pudo guardar en este navegador. Revisa el modo privado o el espacio");return false}
+}
 function persist(){
   if(S.demo)return;
-  try{localStorage.setItem(KEY,JSON.stringify({vehicles:S.vehicles,records:S.records,settings:S.settings}))}
-  catch(e){toast("No se pudo guardar en este navegador. Revisa el modo privado o el espacio")}
+  localSave();
+  syncMarkDirty();
 }
 function clean(o){var r={};Object.keys(o).forEach(function(k){if(o[k]!==undefined&&o[k]!==null&&o[k]!=="")r[k]=o[k]});return r}
 function saveItem(kind,obj){
@@ -295,43 +300,187 @@ function delItem(kind,id){
   persist();
 }
 
-/* ---------- auth (local) ---------- */
-function toHex(u){return Array.prototype.map.call(u,function(b){return ("0"+b.toString(16)).slice(-2)}).join("")}
-function fromHex(h){var a=new Uint8Array(h.length/2);for(var i=0;i<a.length;i++)a[i]=parseInt(h.substr(i*2,2),16);return a}
-function weak(s){var h1=0xdeadbeef,h2=0x41c6ce57;for(var i=0;i<s.length;i++){var c=s.charCodeAt(i);h1=Math.imul(h1^c,2654435761);h2=Math.imul(h2^c,1597334677)}h1=Math.imul(h1^(h1>>>16),2246822507)^Math.imul(h2^(h2>>>13),3266489909);h2=Math.imul(h2^(h2>>>16),2246822507)^Math.imul(h1^(h1>>>13),3266489909);return (h2>>>0).toString(16)+(h1>>>0).toString(16)}
-async function hashPw(pw,salt){
-  if(window.crypto&&crypto.subtle){
-    var k=await crypto.subtle.importKey("raw",new TextEncoder().encode(pw),"PBKDF2",false,["deriveBits"]);
-    var b=await crypto.subtle.deriveBits({name:"PBKDF2",salt:fromHex(salt),iterations:150000,hash:"SHA-256"},k,256);
-    return "p:"+toHex(new Uint8Array(b));
+/* ---------- cuenta y sincronización (Supabase) ---------- */
+var SB_URL="https://xrxlxndlgakpjgqtduns.supabase.co",SB_KEY="sb_publishable_BxQpLRwjjsuk9NHhFDBsxg_8FwXVXkH";
+var ses=null,recTok=null,refreshing=null;
+var SY={rev:null,dirty:false,busy:false,seq:0,timer:null,label:""};
+
+function setSes(j){
+  var u=j.user||{},m=u.user_metadata||{};
+  ses={access_token:j.access_token,refresh_token:j.refresh_token,expires_at:j.expires_at||(Math.floor(Date.now()/1000)+(j.expires_in||3600)),uid:u.id||(ses&&ses.uid),email:u.email||(ses&&ses.email),name:m.name||(ses&&ses.name)||""};
+  try{var st=localStorage.getItem(REM)==="1"?localStorage:sessionStorage,ot=st===localStorage?sessionStorage:localStorage;st.setItem(ACC,JSON.stringify(ses));ot.removeItem(ACC)}catch(e){}
+}
+function loadSes(){try{var j=localStorage.getItem(ACC)||sessionStorage.getItem(ACC);ses=j?JSON.parse(j):null}catch(e){ses=null}return ses}
+function clearSes(){ses=null;try{localStorage.removeItem(ACC);sessionStorage.removeItem(ACC);localStorage.removeItem(REM)}catch(e){}}
+function memClear(){S.vehicles=[];S.records=[];S.settings={};S.vid=null;S.sheet=null;S.draft=null}
+
+async function api(path,opt,noAuth){
+  opt=opt||{};
+  var h=Object.assign({apikey:SB_KEY,"Content-Type":"application/json"},opt.headers||{});
+  if(!noAuth){await ensureFresh();if(!ses){var ns=new Error("Sesión no iniciada");ns.status=401;throw ns}h.Authorization="Bearer "+ses.access_token}
+  var res=await fetch(SB_URL+path,{method:opt.method||"GET",headers:h,body:opt.body?JSON.stringify(opt.body):undefined});
+  var txt=await res.text(),j=null;try{j=txt?JSON.parse(txt):null}catch(e){}
+  if(!res.ok){var er=new Error((j&&(j.msg||j.message||j.error_description||j.error))||("HTTP "+res.status));er.status=res.status;er.code=(j&&(j.error_code||j.code))||"";throw er}
+  return j;
+}
+function ensureFresh(){
+  if(!ses||ses.expires_at-Math.floor(Date.now()/1000)>60)return Promise.resolve();
+  if(!refreshing){
+    refreshing=(async function(){
+      try{var j=await api("/auth/v1/token?grant_type=refresh_token",{method:"POST",body:{refresh_token:ses.refresh_token}},true);setSes(j)}
+      catch(e){if(e.status===400||e.status===401||e.status===403)expireSession();else throw e}
+      finally{refreshing=null}
+    })();
   }
-  return "w:"+weak(salt+pw+salt);
+  return refreshing;
 }
-function getAuth(){try{return JSON.parse(localStorage.getItem(AUTH)||"null")}catch(e){return null}}
-function newSalt(){var a=new Uint8Array(16);crypto.getRandomValues(a);return toHex(a)}
-async function submitAuth(){
-  var a=getAuth(),pw=$("a-pass").value,rem=$("a-rem")&&$("a-rem").checked;
-  S.authErr="";
+function expireSession(){clearSes();memClear();S.demo=false;S.mode="login";S.authErr="Tu sesión ha caducado. Entra de nuevo.";S.authOk="";render(true)}
+function blockAccess(){
+  clearSes();memClear();try{localStorage.removeItem(KEY);localStorage.removeItem(SYNC)}catch(e){}
+  S.mode="login";S.authErr="Este correo no tiene acceso a Mi Garage. Pide que lo autoricen.";S.authOk="";render(true);
+}
+function authMsg(e){
+  var c=e.code||"",m=String(e.message||"");
+  if(c==="invalid_credentials"||/invalid login/i.test(m))return "Correo o contraseña incorrectos.";
+  if(c==="email_not_confirmed"||/not confirmed/i.test(m))return "Tienes que confirmar el correo antes de entrar. Revisa tu bandeja.";
+  if(c==="user_already_exists")return "Ya existe una cuenta con ese correo. Entra con tu contraseña.";
+  if(c==="weak_password")return "La contraseña es demasiado débil. Usa al menos 8 caracteres.";
+  if(e.status===429||c==="over_email_send_rate_limit"||c==="over_request_rate_limit")return "Demasiados intentos. Espera unos minutos y vuelve a probar.";
+  if(c==="signup_disabled")return "El registro de cuentas está desactivado.";
+  if((e&&e.name==="TypeError")||/failed to fetch|network/i.test(m))return "Sin conexión. Comprueba internet y vuelve a intentarlo.";
+  return "No se pudo completar la operación ("+m+").";
+}
+
+/* sincronización: una fila por usuario en la nube; copia local para usarla sin conexión */
+function syncSt(){try{return JSON.parse(localStorage.getItem(SYNC)||"null")||{}}catch(e){return {}}}
+function syncSave(){try{localStorage.setItem(SYNC,JSON.stringify({uid:ses&&ses.uid,rev:SY.rev,dirty:SY.dirty}))}catch(e){}}
+function syncUi(t){SY.label=t;var e=$("syncst");if(e)e.textContent=t}
+function hasData(){return S.vehicles.length>0||S.records.length>0}
+function syncMarkDirty(){
+  if(S.demo||!ses)return;
+  SY.dirty=true;SY.seq++;syncSave();syncUi("Guardando…");
+  clearTimeout(SY.timer);SY.timer=setTimeout(function(){syncPush()},700);
+}
+function syncError(e){
+  if(e&&(e.status===403||e.code==="42501")){blockAccess();return}
+  if(e&&e.status===401)return;
+  syncUi(((e&&e.name==="TypeError")||!navigator.onLine)?"Sin conexión · se subirá al volver":"No se pudo sincronizar");
+}
+async function syncPush(){
+  if(!ses||S.demo||!SY.dirty||SY.busy)return;
+  SY.busy=true;var seq=SY.seq;
+  var snap={vehicles:S.vehicles,records:S.records,settings:S.settings};
   try{
-    if(!a){
-      var nm=$("a-name").value.trim(),pw2=$("a-pass2").value;
-      if(pw.length<6){S.authErr="La contraseña debe tener al menos 6 caracteres.";render();return}
-      if(pw!==pw2){S.authErr="Las contraseñas no coinciden.";render();return}
-      var salt=newSalt(),h=await hashPw(pw,salt);
-      localStorage.setItem(AUTH,JSON.stringify({name:nm,salt:salt,hash:h}));
-      S.name=nm;
-    }else{
-      var hh=await hashPw(pw,a.salt);
-      if(hh!==a.hash){S.authErr="Contraseña incorrecta.";render();return}
-      S.name=a.name||"";
-    }
-    try{if(rem)localStorage.setItem(REM,"1");sessionStorage.setItem(SESS,"1")}catch(e){}
-    enter();
-  }catch(e){S.authErr="No se pudo guardar el acceso en este navegador.";render()}
+    var row;
+    if(SY.rev==null)row=await api("/rest/v1/garage_data",{method:"POST",headers:{Prefer:"return=representation"},body:{user_id:ses.uid,data:snap}});
+    else row=await api("/rest/v1/garage_data?user_id=eq."+ses.uid+"&rev=eq."+SY.rev,{method:"PATCH",headers:{Prefer:"return=representation"},body:{data:snap}});
+    row=Array.isArray(row)?row[0]:row;
+    SY.busy=false;
+    if(!row){await syncDown();return}
+    SY.rev=row.rev;SY.dirty=(SY.seq!==seq);syncSave();
+    syncUi(SY.dirty?"Guardando…":"Sincronizado");
+    if(SY.dirty)await syncPush();
+  }catch(e){
+    SY.busy=false;
+    if(e.status===409||e.code==="23505"){try{await syncDown()}catch(x){syncError(x)}return}
+    syncError(e);
+  }
 }
-function enter(){S.demo=false;S.mode="app";S.tab="resumen";S.vid=null;load();render(true)}
-function enterDemo(){var d=demoData();S.demo=true;S.mode="app";S.vehicles=d.v;S.records=d.r;S.settings={};S.tab="resumen";S.vid=null;render(true)}
-function leave(){try{localStorage.removeItem(REM);sessionStorage.removeItem(SESS)}catch(e){}S.mode=getAuth()?"login":"setup";S.demo=false;S.vehicles=[];S.records=[];S.vid=null;S.authErr="";render(true)}
+function applyCloud(row){
+  var d=row.data||{};
+  S.vehicles=Array.isArray(d.vehicles)?d.vehicles:[];S.records=Array.isArray(d.records)?d.records:[];S.settings=d.settings||{};
+  SY.rev=row.rev;SY.dirty=false;syncSave();localSave();syncUi("Sincronizado");
+  if(S.mode==="app"&&!S.sheet)render();
+}
+async function syncDown(){
+  if(!ses||S.demo)return;
+  syncUi("Sincronizando…");
+  var rows=await api("/rest/v1/garage_data?select=data,rev&user_id=eq."+ses.uid);
+  var row=rows&&rows[0];
+  if(!row){SY.rev=null;SY.dirty=true;SY.seq++;await syncPush();return}
+  if(SY.dirty&&SY.rev===row.rev){await syncPush();return}
+  if(SY.dirty){
+    try{download("mi-garage-cambios-locales-"+iso(new Date())+".json",JSON.stringify({app:"mi-garage",version:1,exported:new Date().toISOString(),vehicles:S.vehicles,records:S.records,settings:S.settings},null,1),"application/json")}catch(e){}
+    toast("Se usaron los datos más recientes de tu cuenta. Tus cambios locales se descargaron en una copia");
+  }
+  applyCloud(row);
+}
+
+/* acceso */
+async function submitAuth(){
+  var m=S.mode,em=String(($("a-email")||{}).value||"").trim().toLowerCase(),pw=($("a-pass")||{}).value||"",rem=!!($("a-rem")&&$("a-rem").checked);
+  var btn=document.querySelector("#af button[type=submit]");
+  S.authErr="";S.authOk="";S.authEmail=em;
+  function fail(t){S.authErr=t;render()}
+  if(!/^\S+@\S+\.\S+$/.test(em))return fail("Escribe un correo válido.");
+  if(m==="forgot"){
+    if(btn)btn.disabled=true;
+    try{await api("/auth/v1/recover?redirect_to="+encodeURIComponent(location.origin+location.pathname),{method:"POST",body:{email:em}},true)}
+    catch(e){if(e.status!==400&&e.status!==422)return fail(authMsg(e))}
+    S.mode="login";S.authOk="Si ese correo tiene cuenta, recibirás un enlace para elegir una contraseña nueva.";return render();
+  }
+  if(m==="signup"){
+    var nm=String(($("a-name")||{}).value||"").trim(),pw2=($("a-pass2")||{}).value||"";
+    S.authName=nm;
+    if(!nm)return fail("Escribe tu nombre.");
+    if(pw.length<8)return fail("La contraseña debe tener al menos 8 caracteres.");
+    if(pw!==pw2)return fail("Las contraseñas no coinciden.");
+    if(btn)btn.disabled=true;
+    var j;
+    try{j=await api("/auth/v1/signup",{method:"POST",body:{email:em,password:pw,data:{name:nm,app:"mi-garage"}}},true)}catch(e){return fail(authMsg(e))}
+    if(j&&j.access_token)return finishLogin(j,rem);
+    S.mode="login";S.authOk="Cuenta creada. Si te llega un correo de confirmación, ábrelo y después entra aquí.";return render();
+  }
+  if(!pw)return fail("Escribe tu contraseña.");
+  if(btn)btn.disabled=true;
+  try{var j2=await api("/auth/v1/token?grant_type=password",{method:"POST",body:{email:em,password:pw}},true);finishLogin(j2,rem)}
+  catch(e){fail(authMsg(e))}
+}
+function finishLogin(j,rem){
+  try{if(rem)localStorage.setItem(REM,"1");else localStorage.removeItem(REM)}catch(e){}
+  setSes(j);S.authEmail="";S.authName="";enter();
+}
+async function submitNew(){
+  var pw=($("n-pass")||{}).value||"",pw2=($("n-pass2")||{}).value||"";
+  S.authErr="";S.authOk="";
+  if(pw.length<8){S.authErr="La contraseña debe tener al menos 8 caracteres.";return render()}
+  if(pw!==pw2){S.authErr="Las contraseñas no coinciden.";return render()}
+  try{await api("/auth/v1/user",{method:"PUT",headers:{Authorization:"Bearer "+recTok},body:{password:pw}},true)}
+  catch(e){S.authErr=authMsg(e);return render()}
+  recTok=null;S.mode="login";S.authOk="Contraseña cambiada. Ya puedes entrar.";render(true);
+}
+function checkRecovery(){
+  var h=location.hash||"";
+  if(!/access_token=|error_code=|type=recovery/.test(h))return false;
+  var p=new URLSearchParams(h.replace(/^#/,""));
+  try{history.replaceState(null,"",location.pathname+location.search)}catch(e){}
+  if(p.get("error_code")||p.get("error")){S.mode="login";S.authErr="El enlace ha caducado o ya se usó. Pide uno nuevo.";return true}
+  if(p.get("type")==="recovery"&&p.get("access_token")){recTok=p.get("access_token");S.mode="recovery";return true}
+  return false;
+}
+function enter(){
+  S.demo=false;S.mode="app";S.tab="resumen";S.vid=null;S.name=ses.name||ses.email||"";
+  var st=syncSt();
+  if(st.uid&&st.uid!==ses.uid){try{localStorage.removeItem(KEY)}catch(e){}SY.rev=null;SY.dirty=false}
+  else{SY.rev=st.rev==null?null:st.rev;SY.dirty=!!st.dirty}
+  memClear();load();
+  if(!st.uid&&hasData())SY.dirty=true;
+  try{localStorage.removeItem(AUTH)}catch(e){}
+  syncSave();render(true);
+  syncDown().catch(syncError);
+}
+function enterDemo(){var d=demoData();S.demo=true;S.mode="app";S.vehicles=d.v;S.records=d.r;S.settings={};S.tab="resumen";S.vid=null;S.name="";render(true)}
+async function leave(){
+  if(S.demo||!ses){S.demo=false;memClear();S.mode="login";S.authErr="";S.authOk="";render(true);return}
+  clearTimeout(SY.timer);
+  if(SY.dirty){try{await syncPush()}catch(e){}}
+  var pending=SY.dirty;
+  try{await api("/auth/v1/logout?scope=local",{method:"POST"})}catch(e){}
+  clearSes();
+  if(pending)toast("Hay cambios sin subir. Se quedan en este dispositivo hasta que vuelvas a entrar");
+  else{try{localStorage.removeItem(KEY);localStorage.removeItem(SYNC)}catch(e){}}
+  memClear();S.mode="login";S.authErr="";S.authOk="";S.authEmail="";render(true);
+}
 
 /* ---------- demo ---------- */
 function demoData(){
@@ -434,7 +583,7 @@ function render(anim){
   if(S.mode!=="app"){root.className="shell"+(anim?" anim":"");root.innerHTML=gateView();return}
   var h='<header class="top"><div class="brand"><span class="mark">'+ICON.wrench+'</span>Mi Garage</div>'+
     '<nav class="nav" aria-label="Secciones">'+navBtn("resumen","Resumen",ICON.home)+navBtn("garage","Garage",ICON.car)+navBtn("gastos","Gastos",ICON.euro)+navBtn("ajustes","Ajustes",ICON.gear)+'</nav>'+
-    '<div class="who">'+(S.demo?'<span class="badge-demo">Ejemplo</span>':'<span>'+esc(S.name||"")+'</span>')+'<button class="linkbtn" data-act="leave">Salir</button></div></header><main>';
+    '<div class="who">'+(S.demo?'<span class="badge-demo">Ejemplo</span>':'<span>'+esc(S.name||"")+'</span><span class="syncst" id="syncst">'+esc(SY.label||"")+'</span>')+'<button class="linkbtn" data-act="leave">Salir</button></div></header><main>';
   if(S.tab==="resumen")h+=resumenView();
   else if(S.tab==="garage")h+=S.vid&&veh(S.vid)?vehicleView(veh(S.vid)):garageView();
   else if(S.tab==="gastos")h+=gastosView();
@@ -446,20 +595,37 @@ function render(anim){
 function navBtn(id,label,icon){return '<button data-act="tab" data-tab="'+id+'"'+(S.tab===id?' aria-current="page"':'')+'>'+icon+'<span>'+label+'</span></button>'}
 
 function gateView(){
-  var a=getAuth(),setup=!a;
+  var m=S.mode;
   var h='<div class="gate"><div class="logo">'+ICON.logo+'</div><div class="hero"><span class="plate big" style="justify-self:start"><i>E</i><b>MI GARAGE</b></span><h1>Tus vehículos,<br>al día</h1><p class="lead">ITV, seguro, taller y combustible de coches, motos y furgonetas en un solo sitio.</p></div>';
-  h+='<form id="af" novalidate>';
-  if(setup){
-    h+='<div class="f"><label for="a-name">Tu nombre</label><input id="a-name" autocomplete="name" placeholder="Miguel Ángel"></div>'+
-       '<div class="f"><label for="a-pass">Crea una contraseña</label><input id="a-pass" type="password" autocomplete="new-password" placeholder="Mínimo 6 caracteres"></div>'+
-       '<div class="f"><label for="a-pass2">Repite la contraseña</label><input id="a-pass2" type="password" autocomplete="new-password"></div>';
-  }else{
-    h+='<div class="f"><label for="a-pass">Contraseña'+(a.name?' de '+esc(a.name):'')+'</label><input id="a-pass" type="password" autocomplete="current-password"></div>';
+  var msg=(S.authOk?'<div class="note" role="status">'+esc(S.authOk)+'</div>':'')+'<div class="err" role="alert">'+esc(S.authErr)+'</div>';
+  if(m==="recovery"){
+    h+='<form id="nf" novalidate><p class="small muted">Elige tu nueva contraseña.</p>'+
+       '<div class="f"><label for="n-pass">Contraseña nueva</label><input id="n-pass" type="password" autocomplete="new-password" placeholder="Mínimo 8 caracteres"></div>'+
+       '<div class="f"><label for="n-pass2">Repite la contraseña</label><input id="n-pass2" type="password" autocomplete="new-password"></div>'+
+       msg+'<button class="btn primary" type="submit">Guardar contraseña</button></form>';
+    return h+'</div>';
   }
-  h+='<label class="check"><input type="checkbox" id="a-rem"> Mantener la sesión en este dispositivo</label><div class="err" role="alert">'+esc(S.authErr)+'</div>'+
-     '<button class="btn primary" type="submit">'+(setup?'Crear acceso y entrar':'Entrar al garage')+'</button><button class="btn" type="button" data-act="demo">Ver con un coche de ejemplo</button></form>';
-  if(!a)h+='<ul><li>'+ICON.check+'<span>Tus datos se guardan solo en este dispositivo, no en ningún servidor.</span></li><li>'+ICON.check+'<span>Haz copias de seguridad desde Ajustes para pasar los datos al móvil o al ordenador.</span></li></ul>';
-  else h+='<p class="small muted">¿Has olvidado la contraseña? <button class="linkbtn" type="button" data-act="forgot">Restablecer acceso</button> (borra los datos de este dispositivo; restáuralos desde tu copia de seguridad).</p>';
+  h+='<form id="af" novalidate>';
+  if(m==="signup"){
+    h+='<div class="f"><label for="a-name">Tu nombre</label><input id="a-name" autocomplete="name" placeholder="Miguel Ángel" value="'+esc(S.authName)+'"></div>'+
+       '<div class="f"><label for="a-email">Correo</label><input id="a-email" type="email" autocomplete="email" inputmode="email" autocapitalize="off" spellcheck="false" value="'+esc(S.authEmail)+'"></div>'+
+       '<div class="f"><label for="a-pass">Crea una contraseña</label><input id="a-pass" type="password" autocomplete="new-password" placeholder="Mínimo 8 caracteres"></div>'+
+       '<div class="f"><label for="a-pass2">Repite la contraseña</label><input id="a-pass2" type="password" autocomplete="new-password"></div>'+
+       msg+'<button class="btn primary" type="submit">Crear cuenta y entrar</button>'+
+       '<p class="small muted">¿Ya tienes cuenta? <button class="linkbtn" type="button" data-act="gologin">Entrar</button></p></form>';
+  }else if(m==="forgot"){
+    h+='<p class="small muted">Escribe tu correo y te enviaremos un enlace para elegir una contraseña nueva.</p>'+
+       '<div class="f"><label for="a-email">Correo</label><input id="a-email" type="email" autocomplete="email" inputmode="email" autocapitalize="off" spellcheck="false" value="'+esc(S.authEmail)+'"></div>'+
+       msg+'<button class="btn primary" type="submit">Enviar enlace</button>'+
+       '<p class="small muted"><button class="linkbtn" type="button" data-act="gologin">Volver a entrar</button></p></form>';
+  }else{
+    h+='<div class="f"><label for="a-email">Correo</label><input id="a-email" type="email" autocomplete="username" inputmode="email" autocapitalize="off" spellcheck="false" value="'+esc(S.authEmail)+'"></div>'+
+       '<div class="f"><label for="a-pass">Contraseña</label><input id="a-pass" type="password" autocomplete="current-password"></div>'+
+       '<label class="check"><input type="checkbox" id="a-rem"> Mantener la sesión en este dispositivo</label>'+
+       msg+'<button class="btn primary" type="submit">Entrar al garage</button><button class="btn" type="button" data-act="demo">Ver con un coche de ejemplo</button>'+
+       '<p class="small muted">¿No tienes cuenta? <button class="linkbtn" type="button" data-act="gosignup">Crear cuenta</button> · <button class="linkbtn" type="button" data-act="forgot">He olvidado la contraseña</button></p></form>';
+  }
+  if(m==="login"||m==="signup")h+='<ul><li>'+ICON.check+'<span>Tus datos están en tu cuenta y se sincronizan entre tus dispositivos.</span></li><li>'+ICON.check+'<span>Solo pueden crear cuenta los correos autorizados.</span></li><li>'+ICON.check+'<span>Funciona sin conexión: los cambios se suben al volver.</span></li></ul>';
   return h+'</div>';
 }
 
@@ -569,14 +735,14 @@ function gastosView(){
 function ajustesView(){
   var last=S.settings.lastBackup;
   return '<h2>Ajustes</h2>'+
-  '<section class="panel"><h3>Copia de seguridad</h3><p class="small muted" style="margin-top:6px">Los datos viven solo en este dispositivo. Descarga una copia para guardarla o para llevarla a otro dispositivo.</p>'+
+  '<section class="panel"><h3>Copia de seguridad</h3><p class="small muted" style="margin-top:6px">Tus datos se guardan en tu cuenta y se sincronizan entre dispositivos. Descarga una copia si quieres tener una aparte.</p>'+
    '<div class="setrow"><div><b>Copia completa (JSON)</b><div class="small muted">'+(last?'Última: '+esc(fdate(last)):'Aún no has hecho ninguna')+'</div></div><button class="btn" data-act="exportjson"'+(S.demo?' disabled':'')+'>Descargar</button></div>'+
    '<div class="setrow"><div><b>Gastos en Excel (CSV)</b><div class="small muted">Para abrir en Excel u otras hojas de cálculo</div></div><button class="btn" data-act="exportcsv">Descargar</button></div>'+
    '<div class="setrow"><div><b>Importar copia</b><div class="small muted">Sustituye los datos actuales por los de un archivo JSON</div></div><button class="btn" data-act="importpick"'+(S.demo?' disabled':'')+'>Elegir archivo</button></div></section>'+
   '<section class="panel"><h3>Consulta por matrícula</h3><div class="setrow"><div><b>Clave del servicio apivehiculo.com</b><div class="small muted">'+(getKey()?'Clave guardada en este dispositivo':'Necesaria para rellenar la ficha a partir de la matrícula')+'</div></div><button class="btn" data-act="setkey">'+(getKey()?'Cambiar':'Configurar')+'</button></div></section>'+
   '<section class="panel"><h3>Instalar en el móvil</h3><p class="small muted" style="margin-top:6px">Android (Chrome): menú ⋮ y "Instalar aplicación". iPhone (Safari): botón Compartir y "Añadir a pantalla de inicio". Después se abre como una app y funciona sin conexión.</p></section>'+
-  '<section class="panel"><h3>Seguridad</h3><div class="setrow"><div><b>Contraseña</b><div class="small muted">Protege la entrada a la app en este dispositivo</div></div><button class="btn" data-act="chpass"'+(S.demo?' disabled':'')+'>Cambiar</button></div>'+
-  '<div class="setrow"><div><b>Borrar todos los datos</b><div class="small muted">Elimina vehículos y registros de este dispositivo</div></div><button class="btn danger" data-act="wipe"'+(S.demo?' disabled':'')+'>Borrar</button></div></section>';
+  '<section class="panel"><h3>Seguridad</h3><div class="setrow"><div><b>Cuenta</b><div class="small muted">'+(S.demo?'Modo de ejemplo, sin cuenta':esc(ses&&ses.email||""))+'</div></div></div><div class="setrow"><div><b>Contraseña</b><div class="small muted">Protege el acceso a tu cuenta</div></div><button class="btn" data-act="chpass"'+(S.demo?' disabled':'')+'>Cambiar</button></div>'+
+  '<div class="setrow"><div><b>Borrar todos los datos</b><div class="small muted">Elimina vehículos y registros de tu cuenta y de este dispositivo</div></div><button class="btn danger" data-act="wipe"'+(S.demo?' disabled':'')+'>Borrar</button></div></section>';
 }
 
 /* ---------- sheets ---------- */
@@ -813,10 +979,9 @@ document.addEventListener("click",function(e){
   if(a==="veil"){if(e.target===t)closeSheet();return}
   if(a==="demo")enterDemo();
   else if(a==="leave")leave();
-  else if(a==="forgot"){
-    openSheet(head("Restablecer acceso")+'<p style="margin-top:12px">Se borrarán la contraseña y todos los datos guardados en este dispositivo. Después podrás crear un acceso nuevo e importar tu copia de seguridad.</p><div class="row between" style="margin-top:16px"><button class="btn" data-act="close">Cancelar</button><button class="btn danger" data-act="doreset">Borrar y restablecer</button></div>');
-  }
-  else if(a==="doreset"){try{localStorage.removeItem(AUTH);localStorage.removeItem(KEY);localStorage.removeItem(REM);sessionStorage.removeItem(SESS)}catch(x){}closeSheet();S.mode="setup";S.authErr="";render(true)}
+  else if(a==="forgot"){S.mode="forgot";S.authErr="";S.authOk="";render(true)}
+  else if(a==="gosignup"){S.mode="signup";S.authErr="";S.authOk="";render(true)}
+  else if(a==="gologin"){S.mode="login";S.authErr="";S.authOk="";render(true)}
   else if(a==="tab"){S.tab=d.tab;S.vid=null;render(true);window.scrollTo(0,0)}
   else if(a==="openveh"){S.vid=d.id;render(true);window.scrollTo(0,0)}
   else if(a==="back"){S.vid=null;render(true)}
@@ -853,7 +1018,7 @@ document.addEventListener("click",function(e){
     openSheet(head("Cambiar contraseña")+'<form id="cf" novalidate>'+'<div class="f"><label for="c-old">Contraseña actual</label><input id="c-old" type="password" autocomplete="current-password"></div><div class="f"><label for="c-new">Contraseña nueva</label><input id="c-new" type="password" autocomplete="new-password"></div><div class="err" id="c-err" role="alert"></div><div class="row between"><button type="button" class="btn" data-act="close">Cancelar</button><button type="submit" class="btn primary">Cambiar</button></div></form>');
   }
   else if(a==="wipe"){
-    openSheet(head("Borrar todos los datos")+'<p style="margin-top:12px">Se eliminarán '+S.vehicles.length+' vehículos y '+S.records.length+' registros de este dispositivo. No se puede deshacer; descarga antes una copia si la quieres.</p><div class="row between" style="margin-top:16px"><button class="btn" data-act="close">Cancelar</button><button class="btn danger" data-act="dowipe">Borrar todo</button></div>');
+    openSheet(head("Borrar todos los datos")+'<p style="margin-top:12px">Se eliminarán '+S.vehicles.length+' vehículos y '+S.records.length+' registros de tu cuenta y de este dispositivo. No se puede deshacer; descarga antes una copia si la quieres.</p><div class="row between" style="margin-top:16px"><button class="btn" data-act="close">Cancelar</button><button class="btn danger" data-act="dowipe">Borrar todo</button></div>');
   }
   else if(a==="dowipe"){S.vehicles=[];S.records=[];S.settings={};persist();closeSheet();S.vid=null;render(true);toast("Datos borrados")}
   else if(a==="delrec"||a==="delveh"){
@@ -866,16 +1031,19 @@ document.addEventListener("click",function(e){
 document.addEventListener("submit",function(e){
   e.preventDefault();var id=e.target.id;
   if(id==="af")submitAuth();
+  else if(id==="nf")submitNew();
   else if(id==="vf")submitVeh();
   else if(id==="rf")submitRec();
   else if(id==="pf")submitPlan();
   else if(id==="kf"){var kv=$("k-key").value.trim();try{if(kv)localStorage.setItem(APIKEY,kv);else localStorage.removeItem(APIKEY)}catch(x){}closeSheet();toast(kv?"Clave guardada":"Clave eliminada");if(S.mode==="app")render()}
   else if(id==="cf"){
     (async function(){
-      var a=getAuth(),old=$("c-old").value,nw=$("c-new").value,er=$("c-err");
-      if(nw.length<6){er.textContent="La nueva contraseña debe tener al menos 6 caracteres.";return}
-      if(await hashPw(old,a.salt)!==a.hash){er.textContent="La contraseña actual no es correcta.";return}
-      var salt=newSalt();a.salt=salt;a.hash=await hashPw(nw,salt);localStorage.setItem(AUTH,JSON.stringify(a));closeSheet();toast("Contraseña cambiada");
+      var old=$("c-old").value,nw=$("c-new").value,er=$("c-err");
+      if(nw.length<8){er.textContent="La nueva contraseña debe tener al menos 8 caracteres.";return}
+      try{await api("/auth/v1/token?grant_type=password",{method:"POST",body:{email:ses.email,password:old}},true)}
+      catch(x){er.textContent=x.status===400?"La contraseña actual no es correcta.":authMsg(x);return}
+      try{await api("/auth/v1/user",{method:"PUT",body:{password:nw}});closeSheet();toast("Contraseña cambiada")}
+      catch(x){er.textContent=authMsg(x)}
     })();
   }
 });
@@ -893,11 +1061,18 @@ document.addEventListener("keydown",function(e){if(e.key==="Escape"&&S.sheet)clo
 
 /* ---------- start ---------- */
 (function(){
-  var a=getAuth(),auto=false;
-  try{auto=!!a&&(localStorage.getItem(REM)==="1"||sessionStorage.getItem(SESS)==="1")}catch(e){}
-  if(auto){S.name=a.name||"";enter()}
-  else{S.mode=a?"login":"setup";render(true)}
+  if(checkRecovery())render(true);
+  else{loadSes();if(ses)enter();else{S.mode="login";render(true)}}
   try{if(navigator.storage&&navigator.storage.persist)navigator.storage.persist()}catch(e){}
+  document.addEventListener("visibilitychange",function(){
+    if(!ses||S.demo||S.mode!=="app")return;
+    if(document.visibilityState==="hidden"){if(SY.dirty)syncPush()}
+    else if(!SY.dirty)syncDown().catch(syncError);
+  });
+  window.addEventListener("online",function(){
+    if(!ses||S.demo||S.mode!=="app")return;
+    if(SY.dirty)syncPush();else syncDown().catch(syncError);
+  });
   if("serviceWorker" in navigator&&/^https?:$/.test(location.protocol)){window.addEventListener("load",function(){navigator.serviceWorker.register("sw.js").catch(function(){})})}
 })();
 })();

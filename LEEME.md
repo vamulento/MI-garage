@@ -1,24 +1,31 @@
-# Mi Garage: cómo publicarla gratis
+# Mi Garage
 
-Son 5 archivos estáticos (index.html, manifest.webmanifest, sw.js y dos iconos). No necesitan servidor.
+App web instalable (PWA) para llevar tus vehículos: ITV, seguro, taller y combustible.
+Es un sitio estático (`index.html`, `sw.js`, `manifest.webmanifest` e iconos) que se publica en Vercel.
 
-## Opción 1: GitHub Pages
-1. Crea una cuenta gratuita en github.com.
-2. Nuevo repositorio llamado `mi-garage` (público, el plan gratuito de Pages lo exige).
-3. "Add file" > "Upload files": sube los 5 archivos de esta carpeta. NO subas `mis-datos-garage.json`.
-4. Settings > Pages > Source: "Deploy from a branch", rama `main`, carpeta `/ (root)`. Guarda.
-5. En 1 o 2 minutos tendrás tu dirección: `https://TU-USUARIO.github.io/mi-garage/`
+## Cuentas y datos
 
-## Opción 2: Netlify Drop (sin cuenta de GitHub)
-Arrastra la carpeta a app.netlify.com/drop. Te da una dirección web al instante.
+- Entras con **correo y contraseña** (Supabase Auth). Tus datos se guardan en tu cuenta y se sincronizan entre dispositivos. Cada dispositivo guarda además una copia para usarla sin conexión; los cambios se suben al volver.
+- **Solo pueden usar la app los correos autorizados.** La lista está en la tabla `garage_allowed_emails` del proyecto de Supabase. Aunque alguien consiga crear una cuenta, las reglas de la base de datos (RLS) no le dejan leer ni escribir nada de Mi Garage.
+- Cada usuario ve solo su fila de la tabla `garage_data`.
+- Al pulsar **Salir** se borran los datos de ese dispositivo (siguen en tu cuenta).
+- Si cambian los datos en otro dispositivo mientras trabajas sin conexión, gana lo de la cuenta y se descarga una copia de tus cambios locales.
+- La clave de consulta por matrícula (apivehiculo.com) se guarda solo en cada dispositivo, nunca en la nube.
 
-## Primer uso
-1. Abre la dirección, crea tu contraseña y entra.
-2. Ajustes > Importar copia > elige `mis-datos-garage.json`.
-3. Instálala: Android (Chrome) menú ⋮ > "Instalar aplicación"; iPhone (Safari) Compartir > "Añadir a pantalla de inicio".
+## Autorizar a otra persona
 
-## Importante
-- Consulta por matrícula (opcional, de pago): en Ajustes > "Consulta por matrícula" pega tu clave de apivehiculo.com. Sin clave, la ficha se rellena a mano.
-- Los datos se guardan en cada dispositivo, no en la nube. Para usar móvil y ordenador, descarga la copia (Ajustes) y apórtala en el otro con "Importar".
-- Haz una copia de seguridad de vez en cuando. Si borras los datos del navegador, se pierden.
-- El repositorio es público pero tus datos no están en él: solo el código de la app.
+En Supabase, abre el editor SQL del proyecto y ejecuta (con el correo en minúsculas):
+
+```sql
+insert into public.garage_allowed_emails (email) values ('correo@ejemplo.com');
+```
+
+Después esa persona entra en la app, pulsa **Crear cuenta** y elige su contraseña.
+
+## Copias de seguridad
+
+Ajustes > Copia completa (JSON) descarga todo. "Importar copia" sustituye los datos actuales por los de un archivo. Para traer los datos de la versión anterior (que guardaba todo solo en el navegador), descarga la copia allí e impórtala aquí tras entrar.
+
+## Publicación
+
+Cada cambio subido a la rama `main` de GitHub se despliega solo en Vercel.
