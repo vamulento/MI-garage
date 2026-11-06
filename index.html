@@ -406,6 +406,31 @@ async function syncDown(){
   applyCloud(row);
 }
 
+/* solicitudes de acceso: función de Supabase que guarda la petición, avisa por Telegram y envía la invitación al aprobar */
+async function accessCall(body){
+  var res=await fetch(SB_URL+"/functions/v1/garage-access",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
+  var j={};try{j=await res.json()}catch(e){}
+  if(!res.ok){var er=new Error(j.error||"No se pudo completar la operación.");er.status=res.status;er.fromFn=true;throw er}
+  return j;
+}
+function fnMsg(e){return e&&e.fromFn?e.message:authMsg(e)}
+function checkApprove(){
+  var m=(location.hash||"").match(/^#\/aprobar\?(.*)$/);if(!m)return false;
+  var p=new URLSearchParams(m[1]),em=p.get("e"),sg=p.get("s");if(!em||!sg)return false;
+  S.mode="approve";S.apEmail=em;S.apSig=sg;S.apState="loading";S.authErr="";S.authOk="";
+  accessCall({action:"ver",email:em,sig:sg}).then(function(j){S.apState=j.status||"sin solicitud";render()}).catch(function(x){S.apState="error";S.authErr=fnMsg(x);render()});
+  return true;
+}
+async function decideAccess(ok){
+  S.authErr="";S.authOk="";S.apBusy=true;render();
+  try{
+    var j=await accessCall({action:ok?"aprobar":"rechazar",email:S.apEmail,sig:S.apSig});
+    S.apState=j.status;
+    S.authOk=ok?(j.invited?"Aprobado. Se ha enviado la invitación a "+S.apEmail+".":"Aprobado. "+S.apEmail+" ya tenía cuenta y puede entrar."):"Rechazado. "+S.apEmail+" no tendrá acceso.";
+  }catch(e){S.authErr=fnMsg(e);if(e.status===502)S.apState="approved"}
+  S.apBusy=false;render();
+}
+
 /* acceso */
 async function submitAuth(){
   var m=S.mode,em=String(($("a-email")||{}).value||"").trim().toLowerCase(),pw=($("a-pass")||{}).value||"",rem=!!($("a-rem")&&$("a-rem").checked);
@@ -420,16 +445,9 @@ async function submitAuth(){
     S.mode="login";S.authOk="Si ese correo tiene cuenta, recibirás un enlace para elegir una contraseña nueva.";return render();
   }
   if(m==="signup"){
-    var nm=String(($("a-name")||{}).value||"").trim(),pw2=($("a-pass2")||{}).value||"";
-    S.authName=nm;
-    if(!nm)return fail("Escribe tu nombre.");
-    if(pw.length<8)return fail("La contraseña debe tener al menos 8 caracteres.");
-    if(pw!==pw2)return fail("Las contraseñas no coinciden.");
     if(btn)btn.disabled=true;
-    var j;
-    try{j=await api("/auth/v1/signup",{method:"POST",body:{email:em,password:pw,data:{name:nm,app:"mi-garage"}}},true)}catch(e){return fail(authMsg(e))}
-    if(j&&j.access_token)return finishLogin(j,rem);
-    S.mode="login";S.authOk="Cuenta creada. Si te llega un correo de confirmación, ábrelo y después entra aquí.";return render();
+    try{await accessCall({action:"solicitar",email:em})}catch(e){return fail(fnMsg(e))}
+    S.mode="login";S.authOk="Solicitud enviada. Cuando la aprueben recibirás una invitación por correo para elegir tu contraseña.";return render();
   }
   if(!pw)return fail("Escribe tu contraseña.");
   if(btn)btn.disabled=true;
@@ -447,15 +465,16 @@ async function submitNew(){
   if(pw!==pw2){S.authErr="Las contraseñas no coinciden.";return render()}
   try{await api("/auth/v1/user",{method:"PUT",headers:{Authorization:"Bearer "+recTok},body:{password:pw}},true)}
   catch(e){S.authErr=authMsg(e);return render()}
-  recTok=null;S.mode="login";S.authOk="Contraseña cambiada. Ya puedes entrar.";render(true);
+  recTok=null;S.mode="login";S.authOk=S.invite?"Contraseña guardada. Ya puedes entrar a Mi Garage.":"Contraseña cambiada. Ya puedes entrar.";S.invite=false;render(true);
 }
 function checkRecovery(){
   var h=location.hash||"";
-  if(!/access_token=|error_code=|type=recovery/.test(h))return false;
+  if(!/access_token=|error_code=|type=recovery|type=invite/.test(h))return false;
   var p=new URLSearchParams(h.replace(/^#/,""));
   try{history.replaceState(null,"",location.pathname+location.search)}catch(e){}
   if(p.get("error_code")||p.get("error")){S.mode="login";S.authErr="El enlace ha caducado o ya se usó. Pide uno nuevo.";return true}
-  if(p.get("type")==="recovery"&&p.get("access_token")){recTok=p.get("access_token");S.mode="recovery";return true}
+  var ty=p.get("type");
+  if((ty==="recovery"||ty==="invite")&&p.get("access_token")){recTok=p.get("access_token");S.mode="recovery";S.invite=(ty==="invite");return true}
   return false;
 }
 function enter(){
@@ -599,19 +618,25 @@ function gateView(){
   var h='<div class="gate"><div class="logo">'+ICON.logo+'</div><div class="hero"><span class="plate big" style="justify-self:start"><i>E</i><b>MI GARAGE</b></span><h1>Tus vehículos,<br>al día</h1><p class="lead">ITV, seguro, taller y combustible de coches, motos y furgonetas en un solo sitio.</p></div>';
   var msg=(S.authOk?'<div class="note" role="status">'+esc(S.authOk)+'</div>':'')+'<div class="err" role="alert">'+esc(S.authErr)+'</div>';
   if(m==="recovery"){
-    h+='<form id="nf" novalidate><p class="small muted">Elige tu nueva contraseña.</p>'+
+    h+='<form id="nf" novalidate><p class="small muted">'+(S.invite?"Te han dado acceso a Mi Garage. Elige tu contraseña para empezar.":"Elige tu nueva contraseña.")+'</p>'+
        '<div class="f"><label for="n-pass">Contraseña nueva</label><input id="n-pass" type="password" autocomplete="new-password" placeholder="Mínimo 8 caracteres"></div>'+
        '<div class="f"><label for="n-pass2">Repite la contraseña</label><input id="n-pass2" type="password" autocomplete="new-password"></div>'+
        msg+'<button class="btn primary" type="submit">Guardar contraseña</button></form>';
     return h+'</div>';
   }
+  if(m==="approve"){
+    var st=S.apState,busy=!!S.apBusy,done=st==="approved"||st==="rejected";
+    var lab={loading:"Comprobando…",pending:"Pendiente de decisión",approved:"Ya aprobada",rejected:"Ya rechazada","sin solicitud":"Sin solicitud registrada",error:""}[st]||"";
+    h+='<div id="ap"><p class="small muted">Solicitud de acceso a Mi Garage</p><p class="lead"><b>'+esc(S.apEmail)+'</b></p>'+(lab?'<p class="small muted">'+esc(lab)+'</p>':'')+msg+
+       (st==="loading"||st==="error"?'':'<button class="btn primary" type="button" data-act="apok"'+(busy?' disabled':'')+'>'+(st==="approved"?"Reenviar invitación":"Aprobar y enviar invitación")+'</button>'+(done&&st==="rejected"?'':'<button class="btn" type="button" data-act="apno"'+(busy?' disabled':'')+'>Rechazar</button>'))+
+       '<p class="small muted"><button class="linkbtn" type="button" data-act="gologin">Ir a Mi Garage</button></p></div>';
+    return h+'</div>';
+  }
   h+='<form id="af" novalidate>';
   if(m==="signup"){
-    h+='<div class="f"><label for="a-name">Tu nombre</label><input id="a-name" autocomplete="name" placeholder="Miguel Ángel" value="'+esc(S.authName)+'"></div>'+
-       '<div class="f"><label for="a-email">Correo</label><input id="a-email" type="email" autocomplete="email" inputmode="email" autocapitalize="off" spellcheck="false" value="'+esc(S.authEmail)+'"></div>'+
-       '<div class="f"><label for="a-pass">Crea una contraseña</label><input id="a-pass" type="password" autocomplete="new-password" placeholder="Mínimo 8 caracteres"></div>'+
-       '<div class="f"><label for="a-pass2">Repite la contraseña</label><input id="a-pass2" type="password" autocomplete="new-password"></div>'+
-       msg+'<button class="btn primary" type="submit">Crear cuenta y entrar</button>'+
+    h+='<p class="small muted">El acceso es solo por invitación. Escribe tu correo y se enviará una solicitud; si la aprueban, recibirás un correo para elegir tu contraseña.</p>'+
+       '<div class="f"><label for="a-email">Tu correo</label><input id="a-email" type="email" autocomplete="email" inputmode="email" autocapitalize="off" spellcheck="false" value="'+esc(S.authEmail)+'"></div>'+
+       msg+'<button class="btn primary" type="submit">Solicitar acceso</button>'+
        '<p class="small muted">¿Ya tienes cuenta? <button class="linkbtn" type="button" data-act="gologin">Entrar</button></p></form>';
   }else if(m==="forgot"){
     h+='<p class="small muted">Escribe tu correo y te enviaremos un enlace para elegir una contraseña nueva.</p>'+
@@ -623,9 +648,9 @@ function gateView(){
        '<div class="f"><label for="a-pass">Contraseña</label><input id="a-pass" type="password" autocomplete="current-password"></div>'+
        '<label class="check"><input type="checkbox" id="a-rem"> Mantener la sesión en este dispositivo</label>'+
        msg+'<button class="btn primary" type="submit">Entrar al garage</button><button class="btn" type="button" data-act="demo">Ver con un coche de ejemplo</button>'+
-       '<p class="small muted">¿No tienes cuenta? <button class="linkbtn" type="button" data-act="gosignup">Crear cuenta</button> · <button class="linkbtn" type="button" data-act="forgot">He olvidado la contraseña</button></p></form>';
+       '<p class="small muted">¿No tienes acceso? <button class="linkbtn" type="button" data-act="gosignup">Solicitar acceso</button> · <button class="linkbtn" type="button" data-act="forgot">He olvidado la contraseña</button></p></form>';
   }
-  if(m==="login"||m==="signup")h+='<ul><li>'+ICON.check+'<span>Tus datos están en tu cuenta y se sincronizan entre tus dispositivos.</span></li><li>'+ICON.check+'<span>Solo pueden crear cuenta los correos autorizados.</span></li><li>'+ICON.check+'<span>Funciona sin conexión: los cambios se suben al volver.</span></li></ul>';
+  if(m==="login"||m==="signup")h+='<ul><li>'+ICON.check+'<span>Tus datos están en tu cuenta y se sincronizan entre tus dispositivos.</span></li><li>'+ICON.check+'<span>El acceso es solo por invitación.</span></li><li>'+ICON.check+'<span>Funciona sin conexión: los cambios se suben al volver.</span></li></ul>';
   return h+'</div>';
 }
 
@@ -981,6 +1006,8 @@ document.addEventListener("click",function(e){
   else if(a==="leave")leave();
   else if(a==="forgot"){S.mode="forgot";S.authErr="";S.authOk="";render(true)}
   else if(a==="gosignup"){S.mode="signup";S.authErr="";S.authOk="";render(true)}
+  else if(a==="apok")decideAccess(true);
+  else if(a==="apno")decideAccess(false);
   else if(a==="gologin"){S.mode="login";S.authErr="";S.authOk="";render(true)}
   else if(a==="tab"){S.tab=d.tab;S.vid=null;render(true);window.scrollTo(0,0)}
   else if(a==="openveh"){S.vid=d.id;render(true);window.scrollTo(0,0)}
@@ -1061,7 +1088,8 @@ document.addEventListener("keydown",function(e){if(e.key==="Escape"&&S.sheet)clo
 
 /* ---------- start ---------- */
 (function(){
-  if(checkRecovery())render(true);
+  if(checkApprove())render(true);
+  else if(checkRecovery())render(true);
   else{loadSes();if(ses)enter();else{S.mode="login";render(true)}}
   try{if(navigator.storage&&navigator.storage.persist)navigator.storage.persist()}catch(e){}
   document.addEventListener("visibilitychange",function(){

@@ -1,4 +1,4 @@
-const V = "garage-v5";
+const V = "garage-v6";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png", "./logo.svg"];
 
 self.addEventListener("install", (e) => {
